@@ -4,10 +4,10 @@ const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Database
-const db = new Database(path.join(__dirname, 'fut-arena.db'));
+const db = new Database(process.env.DB_PATH || path.join(__dirname, 'fut-arena.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
