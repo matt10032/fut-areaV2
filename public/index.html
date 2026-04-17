@@ -290,7 +290,20 @@
     </div>
     <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 8px;text-align:center">
       <div style="font-size:24px;margin-bottom:4px">📊</div>
-      <div style="font-size:11px;color:var(--muted);font-weight:600">Classements<br>en direct</div>
+      <div style="font-size:11px;color:var(--muted);font-weight:600">Classements<br>ELO en direct</div>
+    </div>
+  </div>
+
+  <!-- PUBLIC LIVE DATA -->
+  <div id="public-landing-data" style="max-width:500px;margin:0 auto 24px">
+    <div id="public-stats-strip" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:16px"></div>
+    <div id="public-recent-results" class="card" style="display:none">
+      <div class="card-title" style="font-size:16px">Derniers résultats</div>
+      <div id="recent-list"></div>
+    </div>
+    <div id="public-top-elo" class="card" style="display:none;margin-top:12px">
+      <div class="card-title" style="font-size:16px">🏅 Top ELO</div>
+      <div id="top-elo-list"></div>
     </div>
   </div>
 
@@ -537,6 +550,8 @@
     <button class="tab" data-tab="cap-tournaments">Mes tournois</button>
     <button class="tab" data-tab="cap-matches">Matchs</button>
     <button class="tab" data-tab="cap-history">Historique</button>
+    <button class="tab" data-tab="cap-challenges">Défis 1v1</button>
+    <button class="tab" data-tab="cap-elo">ELO</button>
   </div>
 
   <div id="cap-dash" class="tab-content">
@@ -619,6 +634,29 @@
       <div id="cap-history-list"></div>
     </div>
   </div>
+
+  <div id="cap-challenges" class="tab-content hidden">
+    <div class="card">
+      <div class="card-title">⚔️ Défis 1v1</div>
+      <p class="hint" style="margin-bottom:14px">Défie une autre équipe en dehors d'un tournoi. Le résultat compte dans les stats et l'ELO.</p>
+      <div id="challenge-team-select" style="margin-bottom:14px">
+        <label>Choisir un adversaire</label>
+        <select id="challenge-opponent" style="margin-bottom:8px"><option value="">-- Choisis --</option></select>
+        <button class="btn" onclick="sendChallenge()">⚔️ Envoyer le défi</button>
+      </div>
+      <div class="divider"></div>
+      <div class="card-title" style="font-size:18px">Mes défis</div>
+      <div id="challenges-list"></div>
+    </div>
+  </div>
+
+  <div id="cap-elo" class="tab-content hidden">
+    <div class="card">
+      <div class="card-title">🏅 Classement ELO global</div>
+      <p class="hint" style="margin-bottom:14px">Score ELO calculé sur tous tes matchs (tournois + défis 1v1). +ELO quand tu gagnes, -ELO quand tu perds.</p>
+      <div id="elo-ranking-list"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ============= JOUEUR ============= -->
@@ -672,6 +710,10 @@
       <div class="card-title">Tournois en direct</div>
       <p class="hint" style="margin-bottom:14px">Suis les tournois en spectateur.</p>
       <div id="public-tournaments"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">🏅 Classement ELO global</div>
+      <div id="j-elo-ranking"></div>
     </div>
     <div class="card">
       <div class="card-title">Fil d'actualité</div>
@@ -1025,6 +1067,7 @@ function renderMyTournaments(){
         ${accepted===t.teamCount && t.matches.length===0?`<button class="btn btn-sm" onclick="generateBracket(${t.id})">Lancer</button>`:''}
         ${t.matches.length>0?`<button class="btn btn-sec btn-sm" onclick="viewBracket(${t.id})">Voir</button>`:''}
         ${t.matches.length>0?`<button class="btn btn-sec btn-sm" onclick="shareTournament(${t.id})">🔗</button>`:''}
+        ${t.status==='open'?`<button class="btn btn-sec btn-sm" onclick="generateInvite(${t.id})">📨</button>`:''}
         ${t.matches.length>0?`<button class="btn btn-sec btn-sm" onclick="showForfeitPicker(${t.id})">⏱</button>`:''}
         <button class="btn btn-danger btn-sm" onclick="deleteTournament(${t.id})">×</button>
       </div>
@@ -1772,13 +1815,18 @@ function renderCapMatches(){
       <div class="hint" style="text-align:center;margin-top:8px">Le match sera validé auto si ${oppName} saisit le même score</div>`;
     }
 
+    // Find opponent gamertag
+    const oppTeam=state.teams.find(x=>x.id===oppId);
+    const oppGt=oppTeam?.gamertag;
+
     return `<div class="match">
-      <div class="item-meta" style="margin-bottom:8px">${t.name}</div>
+      <div class="item-meta" style="margin-bottom:8px">${t.name}${m.scheduledDate?' • '+formatMatchDate(m.scheduledDate):''}</div>
       <div class="match-teams">
         <div class="match-team">${m.t1Name}</div>
         <div class="match-vs">VS</div>
         <div class="match-team right">${m.t2Name}</div>
       </div>
+      ${oppGt?`<div style="text-align:center;margin-top:4px"><span class="gt-badge">🎮 ${oppGt}</span></div>`:''}
       ${statusBox}
       <div class="divider" style="margin:12px 0 8px"></div>
       <details style="font-size:12px;cursor:pointer"><summary style="color:var(--muted);font-weight:600">💬 Chat match</summary>${renderChat(m.id)}</details>
@@ -2022,6 +2070,8 @@ function refreshAll(){
   renderPlayerClub();
   renderClubsList();
   updateNotifBadges();
+  renderEloRanking();
+  renderChallenges();
 }
 
 function renderAdminCalendarSelect(){
@@ -2416,6 +2466,191 @@ function renderLiveFeed(){
   }).join('');
 }
 
+// ============== PUBLIC LANDING DATA ==============
+async function loadPublicLanding(){
+  try {
+    const [stats, recent, elo] = await Promise.all([
+      API.getPublicStats().catch(()=>null),
+      API.getRecentResults().catch(()=>[]),
+      API.getEloRankings().catch(()=>[])
+    ]);
+    if(stats){
+      const el=document.getElementById('public-stats-strip');
+      if(el) el.innerHTML=`
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--accent)">${stats.totalUsers}</div>
+          <div style="font-size:10px;color:var(--muted)">JOUEURS</div>
+        </div>
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--accent)">${stats.totalTeams}</div>
+          <div style="font-size:10px;color:var(--muted)">ÉQUIPES</div>
+        </div>
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--accent-3)">${stats.activeTournaments}</div>
+          <div style="font-size:10px;color:var(--muted)">EN COURS</div>
+        </div>
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--accent)">${stats.totalMatches}</div>
+          <div style="font-size:10px;color:var(--muted)">MATCHS</div>
+        </div>`;
+    }
+    if(recent && recent.length>0){
+      const el=document.getElementById('public-recent-results');
+      const list=document.getElementById('recent-list');
+      if(el&&list){
+        el.style.display='block';
+        list.innerHTML=recent.slice(0,5).map(r=>`
+          <div class="mini-match"><div class="right">${r.t1_name}</div><div class="mini-score">${r.final_s1}-${r.final_s2}</div><div>${r.t2_name}</div></div>
+        `).join('');
+      }
+    }
+    if(elo && elo.length>0){
+      const el=document.getElementById('public-top-elo');
+      const list=document.getElementById('top-elo-list');
+      if(el&&list){
+        el.style.display='block';
+        list.innerHTML=elo.slice(0,5).map((r,i)=>`
+          <div class="item"><div class="item-info"><div class="item-name">${i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.'} ${r.name} [${r.tag}]</div><div class="item-meta">${r.platform} • V${r.wins} N${r.draws} D${r.losses}</div></div><div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--accent)">${r.elo}</div></div>
+        `).join('');
+      }
+    }
+  }catch(e){console.warn('Public landing error',e)}
+}
+
+// ============== ELO RANKINGS ==============
+async function renderEloRanking(){
+  const targets=[document.getElementById('elo-ranking-list'), document.getElementById('j-elo-ranking')];
+  try {
+    const rankings = await API.getEloRankings();
+    const html = rankings.length===0 ? emptyState('🏅','Aucun classement. Joue des matchs !') :
+      `<div class="table-wrap"><table>
+      <thead><tr><th>#</th><th class="team-cell" style="text-align:left">Équipe</th><th>ELO</th><th>Peak</th><th>V</th><th>N</th><th>D</th></tr></thead>
+      <tbody>${rankings.map((r,i)=>`
+        <tr>
+          <td style="font-weight:700;color:${i<3?'var(--accent-3)':'var(--muted)'}">${i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}</td>
+          <td class="team-cell">${r.name} <span style="color:var(--accent);font-family:'JetBrains Mono';font-size:10px">[${r.tag}]</span></td>
+          <td style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:var(--accent)">${r.elo}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted)">${r.peak_elo}</td>
+          <td>${r.wins}</td><td>${r.draws}</td><td>${r.losses}</td>
+        </tr>
+      `).join('')}</tbody></table></div>`;
+    targets.forEach(el=>{if(el) el.innerHTML=html});
+  }catch(e){targets.forEach(el=>{if(el) el.innerHTML=emptyState('❌','Erreur de chargement')})}
+}
+
+// ============== CHALLENGES ==============
+async function renderChallenges(){
+  const sel=document.getElementById('challenge-opponent');
+  const list=document.getElementById('challenges-list');
+  if(!sel||!list) return;
+  const activeTeam=getActiveTeam();
+  if(!activeTeam){list.innerHTML=emptyState('⚠️','Sélectionne une équipe');return}
+
+  // Populate opponent dropdown with all teams (not mine)
+  const allTeams=state.teams.filter(t=>t.owner_id!==currentUser?.id);
+  sel.innerHTML='<option value="">-- Choisis un adversaire --</option>'+allTeams.map(t=>
+    `<option value="${t.id}" data-name="${t.name}">${t.name} [${t.tag}] • ${t.plat}</option>`
+  ).join('');
+
+  // Load my challenges
+  try {
+    const challenges = await API.listChallenges(activeTeam.id);
+    if(challenges.length===0){list.innerHTML=emptyState('⚔️','Aucun défi. Envoie-en un !');return}
+    list.innerHTML=challenges.map(c=>{
+      const iAmChallenger=c.challenger_id===activeTeam.id;
+      const oppName=iAmChallenger?c.opponent_name:c.challenger_name;
+      const myId=iAmChallenger?c.challenger_id:c.opponent_id;
+      const mySub=iAmChallenger?c.c_submitted:c.o_submitted;
+
+      if(c.status==='pending' && !iAmChallenger){
+        return `<div class="item"><div class="item-info"><div class="item-name">⚔️ ${c.challenger_name} te défie !</div><div class="item-meta">${new Date(c.created_at).toLocaleDateString('fr-FR')}</div></div><div class="btn-row"><button class="btn btn-sm" onclick="respondChallenge(${c.id},'accepted')">Accepter</button><button class="btn btn-danger btn-sm" onclick="respondChallenge(${c.id},'declined')">Refuser</button></div></div>`;
+      }
+      if(c.status==='pending' && iAmChallenger){
+        return `<div class="item"><div class="item-info"><div class="item-name">⚔️ vs ${oppName}</div><div class="item-meta">En attente de réponse</div></div><span class="badge badge-pending">En attente</span></div>`;
+      }
+      if(c.status==='accepted' && c.match_status==='pending'){
+        if(mySub){
+          return `<div class="item"><div class="item-info"><div class="item-name">⚔️ vs ${oppName}</div><div class="item-meta">Score envoyé, en attente adversaire</div></div><span class="badge badge-pending">⏳</span></div>`;
+        }
+        return `<div class="match"><div class="item-meta">⚔️ Défi vs ${oppName}</div><div class="score-input"><input type="number" min="0" id="cs1-${c.id}" placeholder="0"><div class="score-sep">-</div><input type="number" min="0" id="cs2-${c.id}" placeholder="0"></div><button class="btn btn-sm" style="width:100%;margin-top:10px" onclick="submitChallengeScore(${c.id},${myId})">Valider</button></div>`;
+      }
+      if(c.status==='completed'){
+        return `<div class="item"><div class="item-info"><div class="item-name">⚔️ ${c.challenger_name} vs ${c.opponent_name}</div><div class="item-meta">Terminé</div></div><div style="font-family:'JetBrains Mono';font-weight:700;font-size:16px">${c.final_s1}-${c.final_s2}</div></div>`;
+      }
+      if(c.status==='declined'){
+        return `<div class="item" style="opacity:.5"><div class="item-info"><div class="item-name">⚔️ vs ${oppName}</div><div class="item-meta">Refusé</div></div><span class="badge badge-rejected">Refusé</span></div>`;
+      }
+      return '';
+    }).join('');
+  }catch(e){list.innerHTML=emptyState('❌','Erreur')}
+}
+
+async function sendChallenge(){
+  const sel=document.getElementById('challenge-opponent');
+  const oppId=parseInt(sel.value);
+  if(!oppId){toast('Choisis un adversaire','error');return}
+  const activeTeam=getActiveTeam();
+  if(!activeTeam) return;
+  const oppName=sel.options[sel.selectedIndex].dataset.name||'Adversaire';
+  try{
+    await API.createChallenge({challenger_id:activeTeam.id, challenger_name:activeTeam.name, opponent_id:oppId, opponent_name:oppName});
+    toast('⚔️ Défi envoyé !');
+    await syncFromServer();
+    renderChallenges();
+  }catch(e){toast(e.message||'Erreur','error')}
+}
+
+async function respondChallenge(id, status){
+  try{
+    await API.respondChallenge(id, status);
+    toast(status==='accepted'?'✓ Défi accepté !':'Défi refusé');
+    renderChallenges();
+  }catch(e){toast(e.message||'Erreur','error')}
+}
+
+async function submitChallengeScore(challengeId, teamId){
+  const s1=parseInt(document.getElementById('cs1-'+challengeId).value);
+  const s2=parseInt(document.getElementById('cs2-'+challengeId).value);
+  if(isNaN(s1)||isNaN(s2)){toast('Score invalide','error');return}
+  try{
+    const r=await API.submitChallengeScore(challengeId, {team_id:teamId, s1, s2});
+    if(r.result==='validated') toast('✓ Score validé !');
+    else if(r.result==='conflict') toast('⚠ Scores différents','error');
+    else toast('📝 En attente adversaire');
+    await syncFromServer();
+    renderChallenges();
+  }catch(e){toast(e.message||'Erreur','error')}
+}
+
+// ============== INVITE LINKS ==============
+async function generateInvite(tid){
+  try{
+    const r=await API.createInvite(tid);
+    const fullUrl=window.location.origin+r.link;
+    try{await navigator.clipboard.writeText(fullUrl);toast('🔗 Lien copié : '+fullUrl)}
+    catch(e){prompt('Copie ce lien :',fullUrl)}
+  }catch(e){toast(e.message||'Erreur','error')}
+}
+
+// Check if we arrived via invite link
+async function checkInviteLink(){
+  const path=window.location.pathname;
+  const match=path.match(/^\/join\/([a-f0-9]+)$/);
+  if(!match) return;
+  const code=match[1];
+  try{
+    const invite=await API.getInvite(code);
+    openModal(`
+      <h3>🏆 Invitation à un tournoi</h3>
+      <div style="font-weight:700;font-size:18px;margin-bottom:8px">${invite.tournament_name}</div>
+      <div class="item-meta" style="margin-bottom:14px">${invite.format} • ${invite.platform} • ${invite.accepted_count}/${invite.team_count} équipes${invite.prize?' • 🏆 '+invite.prize:''}</div>
+      ${invite.rules?`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:13px;margin-bottom:14px;white-space:pre-wrap">${invite.rules}</div>`:''}
+      ${invite.status!=='open'?`<p style="color:var(--danger)">Ce tournoi n'accepte plus d'inscriptions.</p>`:`<p class="hint">Connecte-toi ou crée un compte pour rejoindre ce tournoi !</p>`}
+      <button class="btn btn-sec" onclick="closeModal()" style="margin-top:14px">OK</button>
+    `);
+  }catch(e){console.warn('Invalid invite',e)}
+}
+
 // ============== CLIENT PREFERENCES (localStorage for UI prefs only) ==============
 function savePrefs(){
   try{
@@ -2462,6 +2697,8 @@ if(state.theme==='light'){
 renderUserMenu();
 switchAuthTab('login');
 tryAutoLogin();
+loadPublicLanding();
+checkInviteLink();
 refreshAll();
 </script>
 </body>
