@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Database
-const db = new Database(process.env.DB_PATH || path.join(__dirname, 'fut-arena.db'));
+const db = new Database(path.join(__dirname, 'fut-arena.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -138,6 +138,38 @@ db.exec(`
     user_id INTEGER REFERENCES users(id),
     team_id INTEGER REFERENCES teams(id),
     UNIQUE(user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS elo_ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER UNIQUE REFERENCES teams(id),
+    elo INTEGER DEFAULT 1000,
+    peak_elo INTEGER DEFAULT 1000,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenger_id INTEGER REFERENCES teams(id),
+    challenger_name TEXT,
+    opponent_id INTEGER REFERENCES teams(id),
+    opponent_name TEXT,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending','accepted','declined','completed')),
+    c_score INTEGER,
+    o_score INTEGER,
+    c_submitted TEXT,
+    o_submitted TEXT,
+    final_s1 INTEGER,
+    final_s2 INTEGER,
+    match_status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS tournament_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE,
+    code TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
@@ -394,12 +426,15 @@ function updateTeamStats(t1id, t2id, s1, s2) {
   if(s1 > s2) {
     db.prepare('UPDATE teams SET wins=wins+1 WHERE id=?').run(t1id);
     db.prepare('UPDATE teams SET losses=losses+1 WHERE id=?').run(t2id);
+    updateElo(t1id, t2id, false);
   } else if(s1 < s2) {
     db.prepare('UPDATE teams SET losses=losses+1 WHERE id=?').run(t1id);
     db.prepare('UPDATE teams SET wins=wins+1 WHERE id=?').run(t2id);
+    updateElo(t2id, t1id, false);
   } else {
     db.prepare('UPDATE teams SET draws=draws+1 WHERE id=?').run(t1id);
     db.prepare('UPDATE teams SET draws=draws+1 WHERE id=?').run(t2id);
+    updateElo(t1id, t2id, true);
   }
 }
 
@@ -531,7 +566,184 @@ app.get('/api/standings/:tournamentId', (req, res) => {
   res.json(sorted);
 });
 
-// ============== START ==============
+// ============== ELO SYSTEM ==============
+function ensureElo(teamId){
+  const existing = db.prepare('SELECT id FROM elo_ratings WHERE team_id=?').get(teamId);
+  if(!existing) db.prepare('INSERT INTO elo_ratings (team_id) VALUES (?)').run(teamId);
+}
+
+function updateElo(winnerId, loserId, isDraw){
+  ensureElo(winnerId); ensureElo(loserId);
+  const w = db.prepare('SELECT elo FROM elo_ratings WHERE team_id=?').get(winnerId);
+  const l = db.prepare('SELECT elo FROM elo_ratings WHERE team_id=?').get(loserId);
+  const K = 32;
+  const expW = 1 / (1 + Math.pow(10, (l.elo - w.elo) / 400));
+  const expL = 1 - expW;
+  let newW, newL;
+  if(isDraw){
+    newW = Math.round(w.elo + K * (0.5 - expW));
+    newL = Math.round(l.elo + K * (0.5 - expL));
+  } else {
+    newW = Math.round(w.elo + K * (1 - expW));
+    newL = Math.round(l.elo + K * (0 - expL));
+  }
+  db.prepare('UPDATE elo_ratings SET elo=?, peak_elo=MAX(peak_elo,?), updated_at=CURRENT_TIMESTAMP WHERE team_id=?').run(newW, newW, winnerId);
+  db.prepare('UPDATE elo_ratings SET elo=?, updated_at=CURRENT_TIMESTAMP WHERE team_id=?').run(newL, loserId);
+}
+
+app.get('/api/elo', (req, res) => {
+  const rankings = db.prepare(`
+    SELECT e.team_id, e.elo, e.peak_elo, t.name, t.tag, t.platform, t.wins, t.draws, t.losses
+    FROM elo_ratings e JOIN teams t ON e.team_id=t.id
+    ORDER BY e.elo DESC LIMIT 100
+  `).all();
+  res.json(rankings);
+});
+
+app.get('/api/elo/:teamId', (req, res) => {
+  ensureElo(req.params.teamId);
+  const r = db.prepare('SELECT * FROM elo_ratings WHERE team_id=?').get(req.params.teamId);
+  res.json(r);
+});
+
+// ============== 1v1 CHALLENGES ==============
+app.get('/api/challenges', (req, res) => {
+  const { team_id } = req.query;
+  let q = 'SELECT * FROM challenges ORDER BY created_at DESC LIMIT 50';
+  let challenges;
+  if(team_id){
+    challenges = db.prepare('SELECT * FROM challenges WHERE challenger_id=? OR opponent_id=? ORDER BY created_at DESC').all(team_id, team_id);
+  } else {
+    challenges = db.prepare(q).all();
+  }
+  res.json(challenges);
+});
+
+app.post('/api/challenges', (req, res) => {
+  const { challenger_id, challenger_name, opponent_id, opponent_name } = req.body;
+  if(!challenger_id || !opponent_id) return res.status(400).json({error:'Données manquantes'});
+  if(challenger_id === opponent_id) return res.status(400).json({error:'Tu ne peux pas te défier toi-même'});
+  const r = db.prepare('INSERT INTO challenges (challenger_id, challenger_name, opponent_id, opponent_name) VALUES (?,?,?,?)')
+    .run(challenger_id, challenger_name, opponent_id, opponent_name);
+  addFeed(`⚔️ ${challenger_name} défie ${opponent_name} en 1v1 !`, 'info');
+  res.json({ok:true, id:r.lastInsertRowid});
+});
+
+app.post('/api/challenges/:id/respond', (req, res) => {
+  const { status } = req.body; // 'accepted' or 'declined'
+  db.prepare('UPDATE challenges SET status=? WHERE id=?').run(status, req.params.id);
+  if(status === 'declined'){
+    const c = db.prepare('SELECT * FROM challenges WHERE id=?').get(req.params.id);
+    addFeed(`❌ ${c.opponent_name} refuse le défi de ${c.challenger_name}`, 'info');
+  }
+  res.json({ok:true});
+});
+
+app.post('/api/challenges/:id/score', (req, res) => {
+  const { team_id, s1, s2 } = req.body;
+  const c = db.prepare('SELECT * FROM challenges WHERE id=?').get(req.params.id);
+  if(!c) return res.status(404).json({error:'Défi introuvable'});
+  const isChallenger = team_id === c.challenger_id;
+  const col = isChallenger ? 'c_submitted' : 'o_submitted';
+  db.prepare(`UPDATE challenges SET ${col}=? WHERE id=?`).run(JSON.stringify({s1,s2}), c.id);
+  // Check other side
+  const other = isChallenger ? c.o_submitted : c.c_submitted;
+  if(other){
+    const otherData = JSON.parse(other);
+    if(otherData.s1===s1 && otherData.s2===s2){
+      db.prepare('UPDATE challenges SET final_s1=?,final_s2=?,status=?,match_status=? WHERE id=?').run(s1,s2,'completed','validated',c.id);
+      // Update team stats
+      if(s1 > s2){
+        db.prepare('UPDATE teams SET wins=wins+1 WHERE id=?').run(c.challenger_id);
+        db.prepare('UPDATE teams SET losses=losses+1 WHERE id=?').run(c.opponent_id);
+        updateElo(c.challenger_id, c.opponent_id, false);
+      } else if(s1 < s2){
+        db.prepare('UPDATE teams SET losses=losses+1 WHERE id=?').run(c.challenger_id);
+        db.prepare('UPDATE teams SET wins=wins+1 WHERE id=?').run(c.opponent_id);
+        updateElo(c.opponent_id, c.challenger_id, false);
+      } else {
+        db.prepare('UPDATE teams SET draws=draws+1 WHERE id=?').run(c.challenger_id);
+        db.prepare('UPDATE teams SET draws=draws+1 WHERE id=?').run(c.opponent_id);
+        updateElo(c.challenger_id, c.opponent_id, true);
+      }
+      addFeed(`⚔️ ${c.challenger_name} ${s1}-${s2} ${c.opponent_name} (1v1)`, 'result');
+      return res.json({ok:true, result:'validated'});
+    } else {
+      db.prepare('UPDATE challenges SET match_status=? WHERE id=?').run('conflict',c.id);
+      return res.json({ok:true, result:'conflict'});
+    }
+  }
+  res.json({ok:true, result:'waiting'});
+});
+
+// ============== TOURNAMENT INVITES ==============
+app.post('/api/tournaments/:id/invite', (req, res) => {
+  const tid = req.params.id;
+  const code = crypto.randomBytes(6).toString('hex');
+  try {
+    db.prepare('INSERT INTO tournament_invites (tournament_id, code) VALUES (?,?)').run(tid, code);
+    res.json({ok:true, code, link:`/join/${code}`});
+  } catch(e){ res.status(400).json({error:'Erreur'}); }
+});
+
+app.get('/api/invite/:code', (req, res) => {
+  const invite = db.prepare(`
+    SELECT ti.*, t.name as tournament_name, t.format, t.team_count, t.platform, t.status, t.rules, t.prize
+    FROM tournament_invites ti JOIN tournaments t ON ti.tournament_id=t.id
+    WHERE ti.code=?
+  `).get(req.params.code);
+  if(!invite) return res.status(404).json({error:'Lien invalide'});
+  const accepted = db.prepare("SELECT COUNT(*) as c FROM registrations WHERE tournament_id=? AND status='accepted'").get(invite.tournament_id);
+  invite.accepted_count = accepted.c;
+  res.json(invite);
+});
+
+// Serve invite page
+app.get('/join/:code', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ============== PUBLIC API (no auth needed) ==============
+app.get('/api/public/stats', (req, res) => {
+  const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
+  const totalTeams = db.prepare('SELECT COUNT(*) as c FROM teams').get().c;
+  const totalTournaments = db.prepare('SELECT COUNT(*) as c FROM tournaments').get().c;
+  const totalMatches = db.prepare("SELECT COUNT(*) as c FROM matches WHERE status='validated'").get().c;
+  const activeTournaments = db.prepare("SELECT COUNT(*) as c FROM tournaments WHERE status='running'").get().c;
+  res.json({totalUsers, totalTeams, totalTournaments, totalMatches, activeTournaments});
+});
+
+app.get('/api/public/tournaments', (req, res) => {
+  const tournaments = db.prepare("SELECT id, name, format, team_count, platform, prize, status, winner_name, created_at FROM tournaments WHERE status IN ('running','finished') ORDER BY created_at DESC LIMIT 20").all();
+  tournaments.forEach(t => {
+    const matchCount = db.prepare('SELECT COUNT(*) as c FROM matches WHERE tournament_id=?').get(t.id).c;
+    const doneCount = db.prepare("SELECT COUNT(*) as c FROM matches WHERE tournament_id=? AND status='validated'").get(t.id).c;
+    t.matchCount = matchCount;
+    t.doneCount = doneCount;
+  });
+  res.json(tournaments);
+});
+
+app.get('/api/public/recent', (req, res) => {
+  const recent = db.prepare("SELECT m.t1_name, m.t2_name, m.final_s1, m.final_s2, t.name as tournament_name, m.created_at FROM matches m JOIN tournaments t ON m.tournament_id=t.id WHERE m.status='validated' ORDER BY m.created_at DESC LIMIT 10").all();
+  res.json(recent);
+});
+
+app.get('/api/public/team/:id', (req, res) => {
+  const team = db.prepare('SELECT * FROM teams WHERE id=?').get(req.params.id);
+  if(!team) return res.status(404).json({error:'Équipe introuvable'});
+  team.players = db.prepare('SELECT player_name FROM team_players WHERE team_id=?').all(team.id).map(p=>p.player_name);
+  const r = db.prepare('SELECT AVG(score) as avg FROM ratings WHERE team_id=?').get(team.id);
+  team.rating = r?.avg ? parseFloat(r.avg).toFixed(1) : null;
+  ensureElo(team.id);
+  team.elo = db.prepare('SELECT elo, peak_elo FROM elo_ratings WHERE team_id=?').get(team.id);
+  // Match history
+  team.history = db.prepare("SELECT m.t1_name, m.t2_name, m.t1_id, m.t2_id, m.final_s1, m.final_s2, t.name as tournament_name, m.created_at FROM matches m JOIN tournaments t ON m.tournament_id=t.id WHERE (m.t1_id=? OR m.t2_id=?) AND m.status='validated' ORDER BY m.created_at DESC LIMIT 20").all(team.id, team.id);
+  res.json(team);
+});
+
+// Also update ELO when match scores are validated
+// Patch the existing updateTeamStats to also update ELO
 app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('╔══════════════════════════════════════════╗');
