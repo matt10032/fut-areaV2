@@ -63,6 +63,26 @@ const API = {
   leaveClub: (user_id) => API.req('/api/player/leave-club', {method:'POST', body:{user_id}}),
   getMyClub: (userId) => API.req(`/api/player/club/${userId}`),
 
+  // ELO
+  getEloRankings: () => API.req('/api/elo'),
+  getTeamElo: (teamId) => API.req(`/api/elo/${teamId}`),
+
+  // CHALLENGES
+  listChallenges: (team_id) => API.req('/api/challenges' + (team_id?`?team_id=${team_id}`:'')),
+  createChallenge: (data) => API.req('/api/challenges', {method:'POST', body:data}),
+  respondChallenge: (id, status) => API.req(`/api/challenges/${id}/respond`, {method:'POST', body:{status}}),
+  submitChallengeScore: (id, data) => API.req(`/api/challenges/${id}/score`, {method:'POST', body:data}),
+
+  // INVITES
+  createInvite: (tournamentId) => API.req(`/api/tournaments/${tournamentId}/invite`, {method:'POST'}),
+  getInvite: (code) => API.req(`/api/invite/${code}`),
+
+  // PUBLIC
+  getPublicStats: () => API.req('/api/public/stats'),
+  getPublicTournaments: () => API.req('/api/public/tournaments'),
+  getRecentResults: () => API.req('/api/public/recent'),
+  getPublicTeam: (id) => API.req(`/api/public/team/${id}`),
+
   // STANDINGS
   getStandings: (tournamentId) => API.req(`/api/standings/${tournamentId}`)
 };
